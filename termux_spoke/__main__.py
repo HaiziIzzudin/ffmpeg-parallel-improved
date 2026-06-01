@@ -26,6 +26,7 @@ import logging
 import os
 import signal
 import sys
+from typing import Optional
 # Ensure the package's parent directory is on sys.path so
 # ``from termux_spoke import ...`` resolves correctly regardless
 # of how this script is invoked (``-m termux_spoke``, ``python __main__.py``, etc.).
@@ -41,20 +42,78 @@ from termux_spoke.tui import SpokeTui
 
 # ── Logging Setup ───────────────────────────────────────────
 
+# Mapping from Python log levels to TUI tag names
+_LOG_LEVEL_TO_TAG: dict[int, str] = {
+    logging.DEBUG: "DEBUG",
+    logging.INFO: "INFO",
+    logging.WARNING: "WARN",
+    logging.ERROR: "ERROR",
+    logging.CRITICAL: "ERROR",
+}
 
-def _setup_logging(verbose: bool = False) -> None:
-    """Configure logging to file (stderr goes to Rich TUI)."""
+
+class TuiLogHandler(logging.Handler):
+    """
+    Custom logging handler that routes Python log messages into the
+    SpokeClient TUI log buffer so they appear in the Rich dashboard
+    instead of spewing raw text to stderr (which breaks the TUI).
+
+    Uses a re-entrancy guard to prevent infinite loops: if a log
+    message originates from ``client.add_log()`` (which itself calls
+    ``logger.debug()``), the handler silently skips it.
+    """
+
+    def __init__(self, level: int = logging.NOTSET) -> None:
+        super().__init__(level)
+        self._client: Optional[SpokeClient] = None
+        self._processing = False
+
+    def set_client(self, client: SpokeClient) -> None:
+        """Inject the client reference (created after logging setup)."""
+        self._client = client
+
+    def emit(self, record: logging.LogRecord) -> None:
+        """Called for every log record — route it to the TUI buffer."""
+        if self._processing or self._client is None:
+            return
+        self._processing = True
+        try:
+            msg = self.format(record)
+            tag = _LOG_LEVEL_TO_TAG.get(record.levelno, "DEBUG")
+            # Strip the Python module prefix so TUI message is clean
+            # e.g. "termux_spoke.file_ops: Downloading..." -> "Downloading..."
+            if ": " in msg:
+                msg = msg.split(": ", 1)[1]
+            self._client.add_log(tag, msg)
+        finally:
+            self._processing = False
+
+
+def _setup_logging(verbose: bool = False) -> tuple[TuiLogHandler, logging.FileHandler]:
+    """Configure logging to file + TUI buffer (no stderr spew).
+
+    Returns (tui_handler, file_handler) so the TUI handler can be wired
+    to the SpokeClient later.
+    """
     log_dir = os.path.join(os.path.expanduser("~"), config.TEMP_DIR_NAME, "logs")
     os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(log_dir, "spoke.log")
 
     level = logging.DEBUG if verbose else logging.INFO
+    fmt = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+
+    file_handler = logging.FileHandler(log_file, mode="a")
+    file_handler.setFormatter(logging.Formatter(fmt))
+
+    tui_handler = TuiLogHandler(level=level)
+    # TUI handler format: no timestamp (TUI adds its own), just level + module + message
+    tui_handler.setFormatter(logging.Formatter("[%(levelname)s] %(name)s: %(message)s"))
+
     logging.basicConfig(
         level=level,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
         handlers=[
-            logging.FileHandler(log_file, mode="a"),
-            logging.StreamHandler(sys.stderr),
+            file_handler,
+            tui_handler,
         ],
     )
     logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -62,6 +121,7 @@ def _setup_logging(verbose: bool = False) -> None:
     logging.getLogger("websockets").setLevel(logging.WARNING)
 
     logging.info("Logging to %s", log_file)
+    return tui_handler, file_handler
 
 
 # ── Argument Parsing ────────────────────────────────────────
@@ -123,13 +183,14 @@ def _setup_signal_handlers(loop: asyncio.AbstractEventLoop, shutdown_event: asyn
 async def main(argv: list[str] | None = None) -> int:
     """Main entry point."""
     args = _parse_args(argv)
-    _setup_logging(verbose=args.verbose)
+    tui_handler, _file_handler = _setup_logging(verbose=args.verbose)
 
     # Event to signal shutdown
     shutdown_event = asyncio.Event()
 
     # Create client and TUI
     client = SpokeClient()
+    tui_handler.set_client(client)  # route Python loggers into TUI
     tui = SpokeTui(client)
 
     # Signal handling

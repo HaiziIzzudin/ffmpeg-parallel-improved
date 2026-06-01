@@ -64,7 +64,11 @@ _STYLE_HEADER = Style(color=config.TEXT, bold=True)
 
 # Tag styles for log console
 _TAG_STYLES: dict[str, Style] = {
+    "DEBUG": Style(color=config.SURFACE1),
+    "INFO": Style(color=config.SUBTEXT1, bold=True),
+    "WARN": Style(color=config.YELLOW, bold=True),
     "CONNECT": Style(color=config.BLUE, bold=True),
+    "DISCOVER": Style(color=config.MAUVE, bold=True),
     "REGISTER": Style(color=config.LAVENDER, bold=True),
     "TASK": Style(color=config.YELLOW, bold=True),
     "DOWNLOAD": Style(color=config.TEAL, bold=True),
@@ -74,9 +78,7 @@ _TAG_STYLES: dict[str, Style] = {
     "UPLOAD": Style(color=config.GREEN, bold=True),
     "ERROR": Style(color=config.RED, bold=True),
     "ABORT": Style(color=config.PEACH, bold=True),
-    "WARN": Style(color=config.YELLOW, bold=True),
     "PROTOCOL": Style(color=config.SURFACE1),
-    "DEBUG": Style(color=config.SURFACE1),
 }
 
 # Status colors (dot + text)
