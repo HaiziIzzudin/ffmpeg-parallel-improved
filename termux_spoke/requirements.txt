@@ -1,0 +1,4 @@
+rich>=13.0.0
+websockets>=11.0.0
+httpx>=0.25.0
+zeroconf>=0.63.0

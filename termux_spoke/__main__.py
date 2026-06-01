@@ -1,0 +1,205 @@
+"""
+Entry point for the Termux-native FFmpeg Distributed Spoke.
+
+Usage:
+    python -m termux_spoke                          # auto-discovery
+    python -m termux_spoke --manual 192.168.1.100   # manual IP
+    python -m termux_spoke --manual 192.168.1.100 --port 8000
+
+Wires together:
+    - ``SpokeClient`` — async WebSocket orchestrator
+    - ``SpokeTui`` — Rich Live TUI dashboard
+    - ``HubBrowser`` — Zeroconf discovery
+
+Lifecycle:
+    1. Parse CLI args
+    2. Start TUI (in background task)
+    3. Start discovery or connect directly
+    4. Run main event loop until shutdown
+    5. Clean shutdown on SIGINT/SIGTERM or 'q' key
+"""
+from __future__ import annotations
+
+import argparse
+import asyncio
+import logging
+import os
+import signal
+import sys
+# Ensure termux_spoke package is importable
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from termux_spoke import config
+from termux_spoke.client import SpokeClient
+from termux_spoke.discovery import HubBrowser
+from termux_spoke.tui import SpokeTui
+
+
+# ── Logging Setup ───────────────────────────────────────────
+
+
+def _setup_logging(verbose: bool = False) -> None:
+    """Configure logging to file (stderr goes to Rich TUI)."""
+    log_dir = os.path.join(os.path.expanduser("~"), config.TEMP_DIR_NAME, "logs")
+    os.makedirs(log_dir, exist_ok=True)
+    log_file = os.path.join(log_dir, "spoke.log")
+
+    level = logging.DEBUG if verbose else logging.INFO
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        handlers=[
+            logging.FileHandler(log_file, mode="a"),
+            logging.StreamHandler(sys.stderr),
+        ],
+    )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("zeroconf").setLevel(logging.WARNING)
+    logging.getLogger("websockets").setLevel(logging.WARNING)
+
+    logging.info("Logging to %s", log_file)
+
+
+# ── Argument Parsing ────────────────────────────────────────
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="FFmpeg Distributed Spoke — Termux-native worker client",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  python -m termux_spoke                         Auto-discover hub\n"
+            "  python -m termux_spoke --manual 192.168.1.10   Connect directly\n"
+        ),
+    )
+    parser.add_argument(
+        "--manual",
+        type=str,
+        default="",
+        metavar="IP",
+        help="PC Hub IP address (skip auto-discovery)",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=config.DEFAULT_PORT,
+        help=f"PC Hub port (default: {config.DEFAULT_PORT})",
+    )
+    parser.add_argument(
+        "--verbose", "-v",
+        action="store_true",
+        help="Enable verbose debug logging",
+    )
+    return parser.parse_args(argv)
+
+
+# ── Signal Handling ─────────────────────────────────────────
+
+
+def _setup_signal_handlers(loop: asyncio.AbstractEventLoop, shutdown_event: asyncio.Event) -> None:
+    """Set up signal handlers for graceful shutdown."""
+
+    def _handle_signal() -> None:
+        if not shutdown_event.is_set():
+            logging.info("Received shutdown signal")
+            shutdown_event.set()
+
+    try:
+        loop.add_signal_handler(signal.SIGINT, _handle_signal)
+        loop.add_signal_handler(signal.SIGTERM, _handle_signal)
+    except NotImplementedError:
+        # Windows doesn't support add_signal_handler; fallback to default behavior
+        pass
+
+
+# ── Manual IP Prompt (fallback from TUI) ────────────────────
+
+
+async def main(argv: list[str] | None = None) -> int:
+    """Main entry point."""
+    args = _parse_args(argv)
+    _setup_logging(verbose=args.verbose)
+
+    # Event to signal shutdown
+    shutdown_event = asyncio.Event()
+
+    # Create client and TUI
+    client = SpokeClient()
+    tui = SpokeTui(client)
+
+    # Signal handling
+    loop = asyncio.get_event_loop()
+    _setup_signal_handlers(loop, shutdown_event)
+
+    # Start TUI in background
+    tui_task = asyncio.create_task(tui.run())
+
+    try:
+        browser: Optional[HubBrowser] = None
+
+        if args.manual:
+            # Manual IP mode — connect directly
+            client.add_log("CONNECT", f"Manual IP mode: {args.manual}:{args.port}")
+            await client.connect(args.manual, args.port, method="manual")
+        else:
+            # Auto-discovery mode — start Zeroconf browser
+            client.add_log("DISCOVER", "Starting Zeroconf discovery...")
+
+            hub_found = asyncio.Event()
+            hub_host: list[str] = []
+            hub_port: list[int] = []
+
+            def _on_hub_found(host: str, port: int) -> None:
+                if not hub_found.is_set():
+                    hub_host.append(host)
+                    hub_port.append(port)
+                    hub_found.set()
+
+            browser = HubBrowser(on_hub_found=_on_hub_found)
+            browser.start()
+
+            # Wait for hub to be discovered (or shutdown)
+            discovery_timeout = 30  # seconds
+            try:
+                await asyncio.wait_for(
+                    hub_found.wait(),
+                    timeout=discovery_timeout,
+                )
+                if hub_host:
+                    await client.connect(hub_host[0], hub_port[0], method="auto")
+            except asyncio.TimeoutError:
+                client.add_log(
+                    "DISCOVER",
+                    f"No hub discovered in {discovery_timeout}s. "
+                    "Press [M] for manual IP entry.",
+                )
+
+        # Main wait loop — keep running until shutdown is requested
+        while not shutdown_event.is_set() and not tui.shutdown_requested:
+            await asyncio.sleep(0.5)
+
+    except asyncio.CancelledError:
+        pass
+    finally:
+        # Graceful shutdown
+        logging.info("Shutting down...")
+
+        # Stop Zeroconf browser if it was started
+        if browser is not None:
+            browser.stop()
+
+        await client.shutdown()
+        tui_task.cancel()
+        try:
+            await tui_task
+        except asyncio.CancelledError:
+            pass
+
+    print("\nSpoke shut down. Goodbye!")
+    return 0
+
+
+if __name__ == "__main__":
+    exit_code = asyncio.run(main())
+    sys.exit(exit_code)

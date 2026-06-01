@@ -1,0 +1,55 @@
+# ── Python ────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# ── Virtual environments ─────────────────────────────────────
+venv/
+.venv/
+env/
+
+# ── IDE / Editor ─────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS ───────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Testing ──────────────────────────────────────────────────
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+*.coverage
+
+# ── Project-specific ─────────────────────────────────────────
+# Temp/cache directories created by the spoke or hub
+.ffmpeg_spoke_cache/
+
+# Android build environment (downloaded SDK/cmdline-tools)
+android_build_env/*.zip
+android_build_env/android_sdk/
+android_build_env/sdk/
+android_build_env/gradle/gradle-*/
+android_build_env/jdk/
+
+# Android app build artifacts and Gradle cache
+android_spoke/app/build/
+android_spoke/.gradle/
+
+# Binary test media
+test.mp4
+
+# Misc generated files
+sprightly-dazzling-aurora.md
+
+# Log files
+*.log

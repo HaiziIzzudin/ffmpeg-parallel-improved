@@ -1,0 +1,46 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+}
+
+android {
+    namespace 'com.ffmpegparallel.spoke'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.ffmpegparallel.spoke"
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+    kotlinOptions {
+        jvmTarget = '1.8'
+    }
+}
+
+dependencies {
+    implementation 'androidx.core:core-ktx:1.12.0'
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'com.google.android.material:material:1.11.0'
+    implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+
+    // OkHttp for WebSocket and HTTP Upload/Download
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+
+    // FFmpeg Kit (includes H.264 software encoder via GPL-compatible community fork)
+    implementation 'io.github.jamaismagic.ffmpeg:ffmpeg-kit-lts-16kb:6.1.7'
+}
