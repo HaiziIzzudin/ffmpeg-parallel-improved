@@ -129,7 +129,7 @@ class HubBrowser:
             logger.debug("No IPv4 address for service %s", name)
             return
 
-        host = addresses[0].decode()
+        host = socket.inet_ntoa(addresses[0])
         port = info.port
 
         # Strip IPv6 zone index if present (matches NsdHelper.kt line 57)
