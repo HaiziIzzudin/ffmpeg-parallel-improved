@@ -3,6 +3,10 @@ Async FFmpeg subprocess runner with ``-progress pipe:1`` stdout parsing.
 
 Matches the progress-parsing pattern in ``pc_hub/local_worker.py`` (lines 133-258)
 and the ffmpeg command construction in ``EncodingService.kt`` (lines 232-242).
+
+Hang detection uses a **watchdog task** rather than ``asyncio.wait_for``
+on ``readline()``, because on Android (Termux) pipe reads can block the
+event loop thread, preventing ``wait_for`` from ever firing.
 """
 from __future__ import annotations
 
@@ -20,6 +24,10 @@ from termux_spoke import config
 
 class HangError(Exception):
     """Raised when ffmpeg produces no output for longer than the hang timeout."""
+
+
+class CancelledByWatchdog(Exception):
+    """Raised when the watchdog watchdog task detects a hang."""
 
 logger = logging.getLogger(__name__)
 
@@ -89,8 +97,12 @@ class FfmpegRunner:
 
         self._process: Optional[asyncio.subprocess.Process] = None
         self._cancelled = False
+        self._start_time_mono = 0.0
         self._last_progress_time = 0.0
         self._last_report_time = 0.0
+        self._last_heartbeat_time = 0.0
+        self._got_first_progress = False
+        self._watchdog_triggered = False
 
         # Final stats captured at end
         self._final_speed: float = 0.0
@@ -203,6 +215,8 @@ class FfmpegRunner:
         os.makedirs(os.path.dirname(self.output_path) or ".", exist_ok=True)
 
         self._last_progress_time = time.monotonic()
+        self._start_time_mono = time.monotonic()
+        self._last_heartbeat_time = time.monotonic()
 
         try:
             self._process = await asyncio.create_subprocess_exec(
@@ -226,8 +240,9 @@ class FfmpegRunner:
         try:
             return_code = await self._run_with_hang_detection(state, progress_callback)
 
-        except HangError as exc:
+        except (HangError, CancelledByWatchdog) as exc:
             self._kill_process()
+            logger.warning("[%s] %s", self.task_id, exc)
             return FfmpegResult(
                 task_id=self.task_id, success=False, return_code=-1,
                 error_message=str(exc),
@@ -267,65 +282,134 @@ class FfmpegRunner:
         progress_callback: Optional[Callable[[FfmpegProgress], None]],
     ) -> int:
         """
-        Read ffmpeg progress lines with a per-line timeout for hang detection.
+        Read ffmpeg progress lines with a watchdog task for hang detection.
 
-        Uses ``asyncio.wait_for()`` on each ``readline()`` so that a stalled
-        ffmpeg process (no output for ``hang_timeout`` seconds) is caught.
+        Uses a **watchdog task** instead of ``asyncio.wait_for(readline())``
+        because on Android pipes the readline can block the event loop thread,
+        making ``wait_for``'s timeout never fire.
+
+        The watchdog periodically checks ``_last_progress_time`` against the
+        current wall clock. If no progress line has arrived within the timeout,
+        it sets ``_watchdog_triggered`` and cancels the reader task.
+
+        There are two timeouts:
+        - ``FFMPEG_STARTUP_GRACE`` (180s) for the first progress line (Android
+          ffmpeg can take minutes to initialize).
+        - ``FFMPEG_HANG_TIMEOUT`` (60s) for all subsequent progress lines.
         """
         assert self._process is not None
         assert self._process.stdout is not None
 
-        while True:
-            if self._cancelled:
-                self._kill_process()
-                return -1
+        self._last_progress_time = time.monotonic()
+        self._got_first_progress = False
+        self._watchdog_triggered = False
 
-            # Read the next line with a timeout equal to the hang threshold.
-            # If ffmpeg is alive and encoding, it will emit progress lines
-            # well within this window.  If it hangs, the timeout fires and
-            # we treat it as a hang.
+        async def _reader() -> None:
+            """Read ffmpeg stdout lines and parse progress."""
+            while True:
+                try:
+                    line = await self._process.stdout.readline()
+                except Exception:
+                    break
+
+                if not line:
+                    break
+
+                decoded = line.decode("utf-8", errors="replace").rstrip("\r\n")
+
+                is_end = self._parse_progress_line(decoded, state)
+                now = time.monotonic()
+
+                if is_end:
+                    self._final_speed = state.get("speed", 0.0)
+                    self._final_fps = state.get("fps", 0.0)
+                    break
+
+                self._last_progress_time = now
+                if not self._got_first_progress:
+                    self._got_first_progress = True
+                    logger.info("[%s] First progress line received after %.1fs",
+                                self.task_id, now - self._start_time_mono)
+
+                # Throttle progress callbacks
+                if progress_callback and (now - self._last_report_time) >= config.PROGRESS_INTERVAL:
+                    self._last_report_time = now
+                    prog = FfmpegProgress(
+                        time_us=state.get("time_us", 0),
+                        speed=state.get("speed", 0.0),
+                        fps=state.get("fps", 0.0),
+                        percent=self._compute_percent(state.get("time_us", 0)),
+                        bitrate=state.get("bitrate", 0.0),
+                        total_size=state.get("total_size", 0),
+                    )
+                    progress_callback(prog)
+
+        async def _watchdog() -> None:
+            """Monitor the reader — raise HangError if it stalls."""
+            while True:
+                await asyncio.sleep(2.0)
+
+                if self._watchdog_triggered or self._cancelled:
+                    return
+
+                now = time.monotonic()
+                elapsed = now - self._last_progress_time
+
+                if self._got_first_progress:
+                    timeout = self.hang_timeout
+                else:
+                    timeout = config.FFMPEG_STARTUP_GRACE
+
+                if elapsed >= timeout:
+                    logger.warning(
+                        "[%s] No progress for %.0fs (had_first_progress=%s) — triggering hang kill",
+                        self.task_id, elapsed, self._got_first_progress,
+                    )
+                    self._watchdog_triggered = True
+                    self._kill_process()
+                    return
+
+                # Heartbeat: log periodically so the TUI shows the spoke is alive
+                if (now - self._last_heartbeat_time) >= config.FFMPEG_HEARTBEAT_INTERVAL:
+                    self._last_heartbeat_time = now
+                    if not self._got_first_progress:
+                        logger.info(
+                            "[%s] FFmpeg initializing... (waiting %.0fs of %.0fs grace)",
+                            self.task_id, elapsed, timeout,
+                        )
+                    elif elapsed > 5.0:
+                        logger.info(
+                            "[%s] Encoding, last progress %.0fs ago",
+                            self.task_id, elapsed,
+                        )
+
+        reader_task = asyncio.create_task(_reader())
+        watchdog_task = asyncio.create_task(_watchdog())
+
+        done, pending = await asyncio.wait(
+            [reader_task, watchdog_task],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+
+        # Cancel whichever is still running
+        for task in pending:
+            task.cancel()
             try:
-                line = await asyncio.wait_for(
-                    self._process.stdout.readline(),
-                    timeout=self.hang_timeout,
-                )
-            except asyncio.TimeoutError:
-                self._kill_process()
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
+
+        # If watchdog won, the reader might still be alive — kill it
+        if reader_task in done and reader_task.exception() is None and not reader_task.cancelled():
+            pass  # reader finished naturally or by reaching EOF/progress=end
+        else:
+            # reader was cancelled or raised — check if watchdog triggered
+            if self._watchdog_triggered:
                 raise HangError(
-                    f"FFmpeg hung (no output for {self.hang_timeout}s)"
-                ) from None
-
-            if not line:
-                # EOF - ffmpeg process exited
-                break
-
-            decoded = line.decode("utf-8", errors="replace").rstrip("\r\n")
-
-            is_end = self._parse_progress_line(decoded, state)
-            now = time.monotonic()
-
-            if is_end:
-                self._final_speed = state.get("speed", 0.0)
-                self._final_fps = state.get("fps", 0.0)
-                break
-
-            # Update last-progress timer whenever we receive *any* line,
-            # regardless of whether time_us has advanced yet (handles slow
-            # ffmpeg initialization at startup).
-            self._last_progress_time = now
-
-            # Throttle progress callbacks
-            if progress_callback and (now - self._last_report_time) >= config.PROGRESS_INTERVAL:
-                self._last_report_time = now
-                prog = FfmpegProgress(
-                    time_us=state.get("time_us", 0),
-                    speed=state.get("speed", 0.0),
-                    fps=state.get("fps", 0.0),
-                    percent=self._compute_percent(state.get("time_us", 0)),
-                    bitrate=state.get("bitrate", 0.0),
-                    total_size=state.get("total_size", 0),
+                    f"FFmpeg hung (no progress for "
+                    f"{'startup grace' if not self._got_first_progress else 'encoding'} "
+                    f"period)"
                 )
-                progress_callback(prog)
 
         # Wait for process to fully exit
         return await self._process.wait()

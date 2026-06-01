@@ -42,7 +42,9 @@ RECONNECT_MAX_DELAY: Final[float] = 30.0   # max exponential backoff
 MAX_RECONNECT_ATTEMPTS: Final[int] = 5     # before re-running discovery
 PROGRESS_INTERVAL: Final[float] = 0.5      # seconds between progress updates to hub
 TUI_REFRESH_INTERVAL: Final[float] = 0.2   # seconds between TUI refreshes
-FFMPEG_HANG_TIMEOUT: Final[float] = 30.0   # seconds without progress = hang
+FFMPEG_STARTUP_GRACE: Final[float] = 180.0  # seconds to wait for first progress line (Android can be slow)
+FFMPEG_HANG_TIMEOUT: Final[float] = 60.0    # seconds without progress mid-encode = hang
+FFMPEG_HEARTBEAT_INTERVAL: Final[float] = 15.0  # seconds between "still running" heartbeat logs
 MAX_CACHED_JOBS: Final[int] = 2            # keep source vids for up to N jobs
 TEMP_DIR_NAME: Final[str] = ".ffmpeg_spoke_cache"  # cache dir under $HOME
 
