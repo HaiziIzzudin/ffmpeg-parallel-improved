@@ -67,18 +67,25 @@ fi
 echo -e "  ${GREEN}✓${NC} ffmpeg $(ffmpeg -version 2>&1 | head -1 | grep -oP 'version \K[0-9.]+'||true)"
 
 # ── Step 3: Copy spoke source files ────────────────────────
-echo -e "${YELLOW}[3/5]${NC} Copying spoke source files..."
-if [[ ! -f "$WORK_DIR/__main__.py" ]]; then
-    cp "$SCRIPT_DIR"/*.py "$SCRIPT_DIR"/requirements.txt "$WORK_DIR/"
-    echo -e "  ${GREEN}✓${NC} Source files copied"
+echo -e "${YELLOW}[3/5]${NC} Copying spoke source files into package directory..."
+PKG_DIR="$WORK_DIR/termux_spoke"
+mkdir -p "$PKG_DIR"
+if [[ ! -f "$PKG_DIR/__main__.py" ]]; then
+    cp "$SCRIPT_DIR"/*.py "$PKG_DIR/"
+    cp "$SCRIPT_DIR"/requirements.txt "$WORK_DIR/"
+    echo -e "  ${GREEN}✓${NC} Source files copied to $PKG_DIR"
 else
     # Update only changed files (compare timestamps)
-    for f in "$SCRIPT_DIR"/*.py "$SCRIPT_DIR"/requirements.txt; do
-        dest="$WORK_DIR/$(basename "$f")"
+    for f in "$SCRIPT_DIR"/*.py; do
+        dest="$PKG_DIR/$(basename "$f")"
         if [[ "$f" -nt "$dest" ]]; then
             cp "$f" "$dest"
         fi
     done
+    # Update requirements.txt separately (kept at WORK_DIR level)
+    if [[ "$SCRIPT_DIR/requirements.txt" -nt "$WORK_DIR/requirements.txt" ]]; then
+        cp "$SCRIPT_DIR"/requirements.txt "$WORK_DIR/"
+    fi
     echo -e "  ${GREEN}✓${NC} Source files up to date"
 fi
 
@@ -143,7 +150,7 @@ ARGS+=(--port "$HUB_PORT")
 
 # shellcheck disable=SC1091
 source "$VENV_DIR/bin/activate"
-python __main__.py "${ARGS[@]}"
+python -m termux_spoke "${ARGS[@]}"
 
 # ── Cleanup on exit ────────────────────────────────────────
 RET=$?

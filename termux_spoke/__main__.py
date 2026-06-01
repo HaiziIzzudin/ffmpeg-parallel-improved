@@ -26,8 +26,12 @@ import logging
 import os
 import signal
 import sys
-# Ensure termux_spoke package is importable
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Ensure the package's parent directory is on sys.path so
+# ``from termux_spoke import ...`` resolves correctly regardless
+# of how this script is invoked (``-m termux_spoke``, ``python __main__.py``, etc.).
+_pkg_parent = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _pkg_parent not in sys.path:
+    sys.path.insert(0, _pkg_parent)
 
 from termux_spoke import config
 from termux_spoke.client import SpokeClient
